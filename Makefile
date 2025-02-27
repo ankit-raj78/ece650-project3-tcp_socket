@@ -1,15 +1,14 @@
-# Makefile
-CC = gcc
-CFLAGS = -Wall -Werror -g
-DEPS = potato.h
+CC = g++
+CFLAGS = -Wall -g -std=c++11
+OBJECTS = ringmaster.o player.o
 
 all: ringmaster player
 
-ringmaster: ringmaster.c $(DEPS)
-	$(CC) $(CFLAGS) -o ringmaster ringmaster.c
+ringmaster: ringmaster.cpp potato.hpp
+	$(CC) $(CFLAGS) -o ringmaster ringmaster.cpp
 
-player: player.c $(DEPS)
-	$(CC) $(CFLAGS) -o player player.c
+player: player.cpp potato.hpp
+	$(CC) $(CFLAGS) -o player player.cpp
 
 clean:
-	rm -f ringmaster player *.o
+	rm -f *.o ringmaster player
