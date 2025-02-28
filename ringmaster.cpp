@@ -1,269 +1,212 @@
 #include <iostream>
-#include <cstring>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <cstdlib>
-#include <ctime>
 #include <vector>
+#include <cstring>
+#include <cstdlib>
 #include <algorithm>
-#include "potato.hpp"
+#include <random>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/select.h>
+#include <time.h>
 
-#define MAX_BUFFER 1024
+#include "potato.h"
+#include "network_utils.h"
 
 class Ringmaster {
 private:
-    int port_num;
     int num_players;
     int num_hops;
-    int listener_fd;
+    int server_fd;
     std::vector<int> player_fds;
-    std::vector<struct sockaddr_in> player_addrs;
+    std::vector<std::string> player_ips;
+    std::vector<int> player_ports;
+    std::mt19937 rng;  // Random number generator
 
 public:
-    Ringmaster(int port, int players, int hops) : 
-        port_num(port), num_players(players), num_hops(hops), listener_fd(-1) {
-        player_fds.resize(players, -1);
-        player_addrs.resize(players);
-    }
-
-    ~Ringmaster() {
-        // Close all connections
-        for (int fd : player_fds) {
-            if (fd != -1) close(fd);
-        }
-        if (listener_fd != -1) close(listener_fd);
-    }
-
-    void setupServer() {
-        struct sockaddr_in addr;
-        listener_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (listener_fd < 0) {
-            perror("Error creating socket");
+    Ringmaster(int port, int players, int hops) 
+        : num_players(players), num_hops(hops) {
+        // Initialize random number generator
+        std::random_device rd;
+        rng.seed(rd());
+        
+        // Create server socket
+        try {
+            server_fd = NetworkUtils::create_server_socket(port);
+        } catch (const NetworkError& e) {
+            std::cerr << e.what() << std::endl;
             exit(EXIT_FAILURE);
         }
-
-        // Set socket option to reuse address
-        int yes = 1;
-        setsockopt(listener_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port_num);
-        addr.sin_addr.s_addr = INADDR_ANY;
-
-        if (bind(listener_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-            perror("Error binding socket");
-            close(listener_fd);
-            exit(EXIT_FAILURE);
-        }
-
-        if (listen(listener_fd, num_players) < 0) {
-            perror("Error listening");
-            close(listener_fd);
-            exit(EXIT_FAILURE);
-        }
-
-        std::cout << "Potato Ringmaster\n";
+        
+        std::cout << "Potato Ringmaster" << std::endl;
         std::cout << "Players = " << num_players << std::endl;
         std::cout << "Hops = " << num_hops << std::endl;
     }
-
-    void acceptConnections() {
-        // Accept connections from all players
-        std::vector<int> player_ports(num_players);
-        
-        for (int i = 0; i < num_players; i++) {
-            struct sockaddr_in player_addr;
-            socklen_t addr_len = sizeof(player_addr);
-            
-            int player_fd = accept(listener_fd, (struct sockaddr*)&player_addr, &addr_len);
-            if (player_fd < 0) {
-                perror("Error accepting connection");
-                exit(EXIT_FAILURE);
-            }
-            
-            // Receive player's listening port
-            char init_buffer[MAX_BUFFER];
-            int bytes_received = recv(player_fd, init_buffer, sizeof(int), 0);
-            if (bytes_received <= 0) {
-                perror("Error receiving player init data");
-                exit(EXIT_FAILURE);
-            }
-            
-            int player_port;
-            memcpy(&player_port, init_buffer, sizeof(player_port));
-            player_ports[i] = player_port;
-            
-            // Store the player's connection info and update port
-            player_fds[i] = player_fd;
-            player_addrs[i] = player_addr;
-            player_addrs[i].sin_port = htons(player_port);  // Update with correct listening port
-            
-            // Send player ID and total players
-            char info_buffer[MAX_BUFFER];
-            memcpy(info_buffer, &num_players, sizeof(num_players));
-            memcpy(info_buffer + sizeof(num_players), &i, sizeof(i));
-            
-            if (send(player_fd, info_buffer, sizeof(num_players) + sizeof(i), 0) < 0) {
-                perror("Error sending player info");
-                exit(EXIT_FAILURE);
-            }
-            
-            std::cout << "Player " << i << " is ready to play" << std::endl;
+    
+    ~Ringmaster() {
+        // Close all player connections
+        for (int fd : player_fds) {
+            close(fd);
         }
         
-        // Send neighbor information to each player
+        // Close server socket
+        close(server_fd);
+    }
+    
+    void setup_game() {
+        // Wait for all players to connect
         for (int i = 0; i < num_players; i++) {
-            int left_id = (i - 1 + num_players) % num_players;
-            int right_id = (i + 1) % num_players;
-            
-            // Send left neighbor info
-            char left_info[MAX_BUFFER];
-            struct in_addr left_ip = player_addrs[left_id].sin_addr;
-            int left_port = player_ports[left_id];
-            
-            memcpy(left_info, &left_ip, sizeof(left_ip));
-            memcpy(left_info + sizeof(left_ip), &left_port, sizeof(left_port));
-            
-            if (send(player_fds[i], left_info, sizeof(left_ip) + sizeof(left_port), 0) < 0) {
-                perror("Error sending left neighbor info");
+            try {
+                std::string player_ip;
+                int player_fd = NetworkUtils::accept_connection(server_fd, &player_ip);
+                player_fds.push_back(player_fd);
+                player_ips.push_back(player_ip);
+                
+                // Send player its ID and the total number of players
+                NetworkUtils::send_setup_info(player_fd, i, num_players);
+                
+                // Receive player's port for neighbor connections
+                std::vector<char> data;
+                NetworkUtils::receive_message(player_fd, data);
+                int player_port = *reinterpret_cast<int*>(data.data());
+                player_ports.push_back(player_port);
+                
+                std::cout << "Player " << i << " is ready to play" << std::endl;
+            } catch (const NetworkError& e) {
+                std::cerr << e.what() << std::endl;
                 exit(EXIT_FAILURE);
             }
+        }
+        
+        // Send each player information about its neighbors
+        for (int i = 0; i < num_players; i++) {
+            int left_id = (i + num_players - 1) % num_players;
+            int right_id = (i + 1) % num_players;
             
-            // Send right neighbor info
-            char right_info[MAX_BUFFER];
-            struct in_addr right_ip = player_addrs[right_id].sin_addr;
-            int right_port = player_ports[right_id];
-            
-            memcpy(right_info, &right_ip, sizeof(right_ip));
-            memcpy(right_info + sizeof(right_ip), &right_port, sizeof(right_port));
-            
-            if (send(player_fds[i], right_info, sizeof(right_ip) + sizeof(right_port), 0) < 0) {
-                perror("Error sending right neighbor info");
+            try {
+                NetworkUtils::send_neighbor_info(
+                    player_fds[i],
+                    left_id, right_id,
+                    player_ips[left_id], player_ips[right_id],
+                    player_ports[left_id], player_ports[right_id]
+                );
+            } catch (const NetworkError& e) {
+                std::cerr << e.what() << std::endl;
                 exit(EXIT_FAILURE);
             }
         }
     }
-
-    void startGame() {
-        // If no hops, just end the game
+    
+    void play_game() {
+        // If num_hops is 0, just end the game immediately
         if (num_hops == 0) {
-            shutdownGame();
+            for (int fd : player_fds) {
+                try {
+                    NetworkUtils::send_game_over(fd);
+                } catch (const NetworkError& e) {
+                    std::cerr << e.what() << std::endl;
+                }
+            }
             return;
         }
-    
-        // Create and initialize potato
-        Potato potato;
-        potato.hops = num_hops;
+        
+        // Create potato with specified number of hops
+        Potato potato(num_hops);
         
         // Choose a random player to start with
-        srand(time(NULL));
-        int random_player = rand() % num_players;
+        std::uniform_int_distribution<int> dist(0, num_players - 1);
+        int random_player = dist(rng);
+        
         std::cout << "Ready to start the game, sending potato to player " << random_player << std::endl;
         
         // Send potato to the first player
-        char potato_buffer[MAX_BUFFER];
-        memcpy(potato_buffer, &potato.hops, sizeof(potato.hops));
-        
-        size_t trace_size = potato.trace.size();
-        memcpy(potato_buffer + sizeof(potato.hops), &trace_size, sizeof(trace_size));
-        
-        if (send(player_fds[random_player], potato_buffer, sizeof(potato.hops) + sizeof(trace_size), 0) < 0) {
-            perror("Error sending initial potato");
+        try {
+            NetworkUtils::send_potato(player_fds[random_player], potato);
+        } catch (const NetworkError& e) {
+            std::cerr << e.what() << std::endl;
             exit(EXIT_FAILURE);
         }
         
         // Wait for potato to come back
-        fd_set readfds;
-        FD_ZERO(&readfds);
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
         
-        int max_fd = -1;
+        int max_fd = 0;
         for (int fd : player_fds) {
-            FD_SET(fd, &readfds);
+            FD_SET(fd, &read_fds);
             max_fd = std::max(max_fd, fd);
         }
         
-        // Wait for the potato to come back from any player
-        if (select(max_fd + 1, &readfds, NULL, NULL, NULL) < 0) {
-            perror("Error in select");
+        // Wait for potato to come back from any player
+        if (select(max_fd + 1, &read_fds, NULL, NULL, NULL) < 0) {
+            std::cerr << "Error in select" << std::endl;
             exit(EXIT_FAILURE);
         }
         
+        // Find the player that sent the potato back
+        Potato final_potato;
         for (int i = 0; i < num_players; i++) {
-            if (FD_ISSET(player_fds[i], &readfds)) {
-                char buffer[MAX_BUFFER];
-                int bytes_received = recv(player_fds[i], buffer, sizeof(buffer), 0);
-                
-                if (bytes_received <= 0) {
-                    perror("Error receiving final potato");
+            if (FD_ISSET(player_fds[i], &read_fds)) {
+                try {
+                    final_potato = NetworkUtils::receive_potato(player_fds[i]);
+                    break;
+                } catch (const NetworkError& e) {
+                    std::cerr << e.what() << std::endl;
                     exit(EXIT_FAILURE);
                 }
-                
-                // Extract trace
-                size_t trace_size;
-                memcpy(&trace_size, buffer, sizeof(trace_size));
-                
-                std::vector<int> trace(trace_size);
-                for (size_t j = 0; j < trace_size; j++) {
-                    memcpy(&trace[j], buffer + sizeof(trace_size) + j * sizeof(int), sizeof(int));
-                }
-                
-                // Print trace
-                std::cout << "Trace of potato:" << std::endl;
-                for (size_t j = 0; j < trace_size; j++) {
-                    std::cout << trace[j];
-                    if (j < trace_size - 1) {
-                        std::cout << ",";
-                    }
-                }
-                std::cout << std::endl;
-                
-                break;
             }
         }
         
-        shutdownGame();
-    }
-
-    void shutdownGame() {
-        // Send shutdown signal to all players
+        // Print trace of potato
+        std::cout << "Trace of potato:" << std::endl;
+        std::cout << final_potato.get_trace_string() << std::endl;
+        
+        // Send termination signal to all players
         for (int fd : player_fds) {
-            int shutdown_signal = -1;
-            if (send(fd, &shutdown_signal, sizeof(shutdown_signal), 0) < 0) {
-                perror("Error sending shutdown signal");
-                // Continue with other players
+            try {
+                NetworkUtils::send_game_over(fd);
+            } catch (const NetworkError& e) {
+                std::cerr << e.what() << std::endl;
             }
         }
     }
 };
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
+    // Check command line arguments
     if (argc != 4) {
         std::cerr << "Usage: " << argv[0] << " <port_num> <num_players> <num_hops>" << std::endl;
         return EXIT_FAILURE;
     }
     
-    int port_num = std::atoi(argv[1]);
+    // Parse arguments
+    int port = std::atoi(argv[1]);
     int num_players = std::atoi(argv[2]);
     int num_hops = std::atoi(argv[3]);
     
     // Validate arguments
-    if (num_players <= 1) {
-        std::cerr << "Error: Number of players must be greater than 1" << std::endl;
+    if (port < 1 || port > 65535) {
+        std::cerr << "Error: port must be between 1 and 65535" << std::endl;
         return EXIT_FAILURE;
     }
     
-    if (num_hops < 0 || num_hops > MAX_HOPS) {
-        std::cerr << "Error: Number of hops must be between 0 and " << MAX_HOPS << std::endl;
+    if (num_players < 2) {
+        std::cerr << "Error: number of players must be at least 2" << std::endl;
         return EXIT_FAILURE;
     }
     
-    Ringmaster master(port_num, num_players, num_hops);
-    master.setupServer();
-    master.acceptConnections();
-    master.startGame();
+    if (num_hops < 0 || num_hops > 512) {
+        std::cerr << "Error: hops must be between 0 and 512" << std::endl;
+        return EXIT_FAILURE;
+    }
+    
+    // Create ringmaster and run the game
+    Ringmaster ringmaster(port, num_players, num_hops);
+    ringmaster.setup_game();
+    ringmaster.play_game();
     
     return EXIT_SUCCESS;
 }
