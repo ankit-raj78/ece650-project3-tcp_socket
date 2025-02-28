@@ -38,97 +38,86 @@ public:
         if (server_socket != -1) close(server_socket);
     }
 
-    void connectToMaster() {
-        struct hostent *server;
-        struct sockaddr_in server_addr;
-
+    void connectToMaster(const char* hostname, int port) {
+        // Create a socket for connecting to the ringmaster
         master_socket = socket(AF_INET, SOCK_STREAM, 0);
         if (master_socket < 0) {
             perror("Error creating socket");
             exit(EXIT_FAILURE);
         }
-
-        server = gethostbyname(master_hostname.c_str());
-        if (server == NULL) {
-            std::cerr << "Error: no such host " << master_hostname << std::endl;
+        
+        // Set up the ringmaster's address
+        struct sockaddr_in master_addr;
+        memset(&master_addr, 0, sizeof(master_addr));
+        master_addr.sin_family = AF_INET;
+        master_addr.sin_port = htons(port);
+        
+        // Convert hostname to IP address
+        struct hostent* host_info = gethostbyname(hostname);
+        if (host_info == NULL) {
+            herror("Error getting host info");
             exit(EXIT_FAILURE);
         }
-
-        memset(&server_addr, 0, sizeof(server_addr));
-        server_addr.sin_family = AF_INET;
-        memcpy(&server_addr.sin_addr.s_addr, server->h_addr, server->h_length);
-        server_addr.sin_port = htons(master_port);
-
-        if (connect(master_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        memcpy(&master_addr.sin_addr.s_addr, host_info->h_addr, host_info->h_length);
+        
+        // Connect to the ringmaster
+        if (connect(master_socket, (struct sockaddr*)&master_addr, sizeof(master_addr)) < 0) {
             perror("Error connecting to ringmaster");
             exit(EXIT_FAILURE);
         }
-
-        // Create server socket for neighbor connections
+        
+        // Set up server socket for other players to connect to
         server_socket = socket(AF_INET, SOCK_STREAM, 0);
         if (server_socket < 0) {
             perror("Error creating server socket");
             exit(EXIT_FAILURE);
         }
-
-        // Set socket option to reuse address
-        int yes = 1;
-        setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-
-        struct sockaddr_in player_addr;
-        memset(&player_addr, 0, sizeof(player_addr));
-        player_addr.sin_family = AF_INET;
-        player_addr.sin_addr.s_addr = INADDR_ANY;
-        player_addr.sin_port = 0; // Let OS choose a port
-
-        if (bind(server_socket, (struct sockaddr*)&player_addr, sizeof(player_addr)) < 0) {
-            perror("Error binding player socket");
+        
+        // Set up the server address (bind to any available port)
+        struct sockaddr_in server_addr;
+        memset(&server_addr, 0, sizeof(server_addr));
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+        server_addr.sin_port = 0; // Let OS choose port
+        
+        if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            perror("Error binding server socket");
             exit(EXIT_FAILURE);
         }
-
-        if (listen(server_socket, 2) < 0) { // Listen for 2 potential neighbors
-            perror("Error listening");
+        
+        if (listen(server_socket, 5) < 0) {
+            perror("Error listening on server socket");
             exit(EXIT_FAILURE);
         }
-
-        // Get the port assigned by OS
-        socklen_t addr_len = sizeof(player_addr);
-        if (getsockname(server_socket, (struct sockaddr*)&player_addr, &addr_len) < 0) {
+        
+        // Get the assigned port number
+        socklen_t len = sizeof(server_addr);
+        if (getsockname(server_socket, (struct sockaddr*)&server_addr, &len) < 0) {
             perror("Error getting socket name");
             exit(EXIT_FAILURE);
         }
-
-        // Generate a random player ID for initial communication
-        srand(time(NULL) ^ getpid());
-        player_id = rand();
-
-        // Send player ID and listening port to ringmaster
+        int my_port = ntohs(server_addr.sin_port);
+        
+        // Send our listening port to ringmaster
         char init_buffer[MAX_BUFFER];
-        int port = ntohs(player_addr.sin_port);
+        memcpy(init_buffer, &my_port, sizeof(my_port));
         
-        memcpy(init_buffer, &player_id, sizeof(player_id));
-        memcpy(init_buffer + sizeof(player_id), &port, sizeof(port));
-        
-        if (send(master_socket, init_buffer, sizeof(player_id) + sizeof(port), 0) < 0) {
-            perror("Error sending initial data");
+        if (send(master_socket, init_buffer, sizeof(my_port), 0) < 0) {
+            perror("Error sending player info");
             exit(EXIT_FAILURE);
         }
-
-        // Receive player information from ringmaster
-        char info_buffer[MAX_BUFFER];
-        int bytes_received = recv(master_socket, info_buffer, sizeof(info_buffer), 0);
+        
+        // Receive player ID and total number of players from ringmaster
+        char player_info[MAX_BUFFER];
+        int bytes_received = recv(master_socket, player_info, sizeof(player_info), 0);
         if (bytes_received <= 0) {
             perror("Error receiving player info");
             exit(EXIT_FAILURE);
         }
-
-        // Extract information
-        memcpy(&num_players, info_buffer, sizeof(num_players));
-        memcpy(&left_id, info_buffer + sizeof(num_players), sizeof(left_id));
-        memcpy(&right_id, info_buffer + sizeof(num_players) + sizeof(left_id), sizeof(right_id));
         
-        // Now we know our real player ID
-        player_id = (right_id + num_players - 1) % num_players;
+        // Parse player information
+        memcpy(&num_players, player_info, sizeof(num_players));
+        memcpy(&player_id, player_info + sizeof(num_players), sizeof(player_id));
         
         std::cout << "Connected as player " << player_id << " out of " << num_players << " total players" << std::endl;
         
@@ -137,48 +126,151 @@ public:
     }
 
     void setupNeighbors() {
-        // Instead of trying to connect directly to neighbors, we should get connection info from ringmaster
-        // We need to implement a proper neighbor connection mechanism that avoids race conditions
-        // This is a simplified version that waits for instructions from ringmaster
+        std::cout << "Player " << player_id << " is ready to play" << std::endl;
 
-        // Step 1: Get neighbor IP and port information from ringmaster
-        struct sockaddr_in neighbor_addrs[2]; // Left and right neighbor address info
-        char neighbor_buffer[MAX_BUFFER];
-        
-        // Receive neighbor connection information from ringmaster
-        int bytes_received = recv(master_socket, neighbor_buffer, sizeof(neighbor_buffer), 0);
-        if (bytes_received <= 0) {
-            perror("Error receiving neighbor info");
+        // Calculate neighbor IDs
+        left_id = (player_id - 1 + num_players) % num_players;
+        right_id = (player_id + 1) % num_players;
+
+        // Receive information about neighbors from ringmaster
+        char left_info[MAX_BUFFER], right_info[MAX_BUFFER];
+        if (recv(master_socket, left_info, sizeof(struct in_addr) + sizeof(int), 0) <= 0) {
+            perror("Error receiving left neighbor info");
             exit(EXIT_FAILURE);
         }
         
-        // Extract neighbor information (left and right IP/port)
-        // This needs to be implemented by the ringmaster side as well
-        
-        // Step 2: Set up listening server for incoming connections
-        // We already have server_socket set up from connectToMaster()
-        
-        // Step 3: Connect to neighbors
-        // First accept one connection (the left neighbor trying to connect to us)
-        struct sockaddr_in incoming_addr;
-        socklen_t addr_len = sizeof(incoming_addr);
-        left_socket = accept(server_socket, (struct sockaddr*)&incoming_addr, &addr_len);
-        if (left_socket < 0) {
-            perror("Error accepting left neighbor");
+        if (recv(master_socket, right_info, sizeof(struct in_addr) + sizeof(int), 0) <= 0) {
+            perror("Error receiving right neighbor info");
             exit(EXIT_FAILURE);
         }
+
+        // Extract neighbor information
+        struct in_addr left_ip, right_ip;
+        int left_port, right_port;
         
-        // Connect to our right neighbor
-        right_socket = socket(AF_INET, SOCK_STREAM, 0);
-        if (right_socket < 0) {
-            perror("Error creating right socket");
-            exit(EXIT_FAILURE);
+        memcpy(&left_ip, left_info, sizeof(left_ip));
+        memcpy(&left_port, left_info + sizeof(left_ip), sizeof(left_port));
+        
+        memcpy(&right_ip, right_info, sizeof(right_ip));
+        memcpy(&right_port, right_info + sizeof(right_ip), sizeof(right_port));
+
+        // For a 2-player game, set up direct connections (special case)
+        if (num_players == 2) {
+            if (player_id == 0) {
+                // Player 0 listens for connection from Player 1
+                struct sockaddr_in addr;
+                socklen_t addr_len = sizeof(addr);
+                
+                std::cout << "Player " << player_id << " waiting for connection..." << std::endl;
+                right_socket = accept(server_socket, (struct sockaddr*)&addr, &addr_len);
+                if (right_socket < 0) {
+                    perror("Error accepting connection from player 1");
+                    exit(EXIT_FAILURE);
+                }
+                std::cout << "Player " << player_id << " accepted connection from player 1" << std::endl;
+                
+                // Both neighbors are the same in a 2-player game
+                left_socket = right_socket;
+            }
+            else if (player_id == 1) {
+                // Player 1 connects to Player 0
+                left_socket = socket(AF_INET, SOCK_STREAM, 0);
+                if (left_socket < 0) {
+                    perror("Error creating socket");
+                    exit(EXIT_FAILURE);
+                }
+                
+                struct sockaddr_in addr;
+                memset(&addr, 0, sizeof(addr));
+                addr.sin_family = AF_INET;
+                addr.sin_addr = left_ip;
+                addr.sin_port = htons(left_port);
+                
+                std::cout << "Player " << player_id << " connecting to player 0..." << std::endl;
+                if (connect(left_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                    perror("Error connecting to player 0");
+                    exit(EXIT_FAILURE);
+                }
+                std::cout << "Player " << player_id << " connected to player 0" << std::endl;
+                
+                // Both neighbors are the same in a 2-player game
+                right_socket = left_socket;
+            }
+            return;
         }
-        
-        // Use the information received from ringmaster
-        if (connect(right_socket, (struct sockaddr*)&neighbor_addrs[1], sizeof(neighbor_addrs[1])) < 0) {
-            perror("Error connecting to right neighbor");
-            exit(EXIT_FAILURE);
+
+        // For more than 2 players, use the alternating pattern
+        if (player_id % 2 == 0) {
+            // Even players: accept connections first, then connect
+            
+            // Accept connections from one of the neighbors
+            struct sockaddr_in addr;
+            socklen_t addr_len = sizeof(addr);
+            
+            // Accept connection from left neighbor
+            std::cout << "Player " << player_id << " waiting for connection from player " << left_id << "..." << std::endl;
+            left_socket = accept(server_socket, (struct sockaddr*)&addr, &addr_len);
+            if (left_socket < 0) {
+                perror("Error accepting left neighbor");
+                exit(EXIT_FAILURE);
+            }
+            std::cout << "Player " << player_id << " accepted connection from player " << left_id << std::endl;
+            
+            // Connect to right neighbor
+            right_socket = socket(AF_INET, SOCK_STREAM, 0);
+            if (right_socket < 0) {
+                perror("Error creating right socket");
+                exit(EXIT_FAILURE);
+            }
+            
+            struct sockaddr_in right_addr;
+            memset(&right_addr, 0, sizeof(right_addr));
+            right_addr.sin_family = AF_INET;
+            right_addr.sin_addr = right_ip;
+            right_addr.sin_port = htons(right_port);
+            
+            // Add a short delay to ensure the other side is ready
+            sleep(1);
+            std::cout << "Player " << player_id << " connecting to player " << right_id << "..." << std::endl;
+            if (connect(right_socket, (struct sockaddr*)&right_addr, sizeof(right_addr)) < 0) {
+                perror("Error connecting to right neighbor");
+                exit(EXIT_FAILURE);
+            }
+            std::cout << "Player " << player_id << " connected to player " << right_id << std::endl;
+        } else {
+            // Odd players: connect first, then accept
+            
+            // Connect to left neighbor
+            left_socket = socket(AF_INET, SOCK_STREAM, 0);
+            if (left_socket < 0) {
+                perror("Error creating left socket");
+                exit(EXIT_FAILURE);
+            }
+            
+            struct sockaddr_in left_addr;
+            memset(&left_addr, 0, sizeof(left_addr));
+            left_addr.sin_family = AF_INET;
+            left_addr.sin_addr = left_ip;
+            left_addr.sin_port = htons(left_port);
+            
+            std::cout << "Player " << player_id << " connecting to player " << left_id << "..." << std::endl;
+            if (connect(left_socket, (struct sockaddr*)&left_addr, sizeof(left_addr)) < 0) {
+                perror("Error connecting to left neighbor");
+                exit(EXIT_FAILURE);
+            }
+            std::cout << "Player " << player_id << " connected to player " << left_id << std::endl;
+            
+            // Accept connection from right neighbor
+            struct sockaddr_in addr;
+            socklen_t addr_len = sizeof(addr);
+            
+            std::cout << "Player " << player_id << " waiting for connection from player " << right_id << "..." << std::endl;
+            right_socket = accept(server_socket, (struct sockaddr*)&addr, &addr_len);
+            if (right_socket < 0) {
+                perror("Error accepting right neighbor");
+                exit(EXIT_FAILURE);
+            }
+            std::cout << "Player " << player_id << " accepted connection from player " << right_id << std::endl;
         }
     }
 
@@ -419,7 +511,7 @@ int main(int argc, char *argv[]) {
     int port_num = std::atoi(argv[2]);
     
     Player player(machine_name, port_num);
-    player.connectToMaster();
+    player.connectToMaster(machine_name.c_str(), port_num);
     player.setupNeighbors();
     player.playGame();
     
