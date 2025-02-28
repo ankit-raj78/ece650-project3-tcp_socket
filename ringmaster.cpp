@@ -148,17 +148,12 @@ public:
     }
 
     void startGame() {
-        std::cout << "Ready to start the game" << std::endl;
-
-        // Give players time to establish connections
-        sleep(1);
-
         // If no hops, just end the game
         if (num_hops == 0) {
             shutdownGame();
             return;
         }
-
+    
         // Create and initialize potato
         Potato potato;
         potato.hops = num_hops;
@@ -166,8 +161,7 @@ public:
         // Choose a random player to start with
         srand(time(NULL));
         int random_player = rand() % num_players;
-        std::cout << "Ready to start the game with " << num_hops << " hops" << std::endl;
-        std::cout << "Sending potato to player " << random_player << std::endl;
+        std::cout << "Ready to start the game, sending potato to player " << random_player << std::endl;
         
         // Send potato to the first player
         char potato_buffer[MAX_BUFFER];

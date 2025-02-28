@@ -2,7 +2,7 @@
 #define _POTATO_HPP_
 
 #include <vector>
-#include <bits/basic_string.h>
+#include <string> // Use standard string header instead of bits/basic_string.h
 
 #define MAX_HOPS 512
 
@@ -29,4 +29,4 @@ public:
     }
 };
 
-#endif // _POTATO_H_
+#endif // _POTATO_HPP_
