@@ -189,23 +189,44 @@ public:
     }
     
     // Receive a message with a header
-    static MessageHeader receive_message(int fd, std::vector<char>& data) {
+    static MessageHeader receive_message(int socket_fd, std::vector<char>& data) {
         MessageHeader header;
-        char header_buf[MessageHeader::HEADER_SIZE];
+        ssize_t bytes_received = recv(socket_fd, &header, sizeof(header), MSG_WAITALL);
         
-        if (recv_all(fd, header_buf, MessageHeader::HEADER_SIZE) < 0) {
+        // Check if connection closed (normal during shutdown)
+        if (bytes_received == 0) {
+            // This is connection closure - expected during shutdown
+            // Just return an empty/shutdown message type
+            header.type = GAME_OVER; // Or a special SHUTDOWN type
+            header.size = 0;
+            return header;
+        }
+        
+        // Check for actual error
+        if (bytes_received < 0) {
             throw NetworkError("Failed to receive message header");
         }
         
-        header.deserialize(header_buf);
+        // Handle incomplete header - fix signed/unsigned comparison
+        if ((size_t)bytes_received < sizeof(header)) {
+            throw NetworkError("Received incomplete message header");
+        }
         
+        // Rest of your function to read message body...
         if (header.size > 0) {
             data.resize(header.size);
-            if (recv_all(fd, data.data(), header.size) < 0) {
-                throw NetworkError("Failed to receive message data");
+            ssize_t body_received = recv(socket_fd, data.data(), header.size, MSG_WAITALL);
+            
+            // Fix another potential signed/unsigned comparison
+            if ((size_t)body_received != (size_t)header.size) {
+                if (body_received == 0) {
+                    // Connection closed during message body - can happen during shutdown
+                    header.type = GAME_OVER;
+                    header.size = 0;
+                    return header;
+                }
+                throw NetworkError("Failed to receive complete message body");
             }
-        } else {
-            data.clear();
         }
         
         return header;
@@ -225,7 +246,12 @@ public:
         std::vector<char> data;
         MessageHeader header = receive_message(fd, data);
         
-        if (header.type != POTATO_TRANSFER) {
+        // Handle both potato transfers and game over messages
+        if (header.type == GAME_OVER) {
+            // Game is over, return an empty potato with 0 hops
+            // This will signal the end of the game
+            return Potato(0);
+        } else if (header.type != POTATO_TRANSFER) {
             throw NetworkError("Expected POTATO_TRANSFER message, got " + std::to_string(header.type));
         }
         

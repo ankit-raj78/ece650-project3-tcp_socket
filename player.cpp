@@ -137,40 +137,61 @@ public:
             
             // Check each socket for data
             try {
-                // Ringmaster socket
+                // Check sockets for data
                 if (FD_ISSET(master_fd, &read_fds)) {
-                    std::vector<char> data;
-                    MessageHeader header = NetworkUtils::receive_message(master_fd, data);
-                    
-                    // Check message type
-                    if (header.type == GAME_OVER) {
-                        // Game is over, exit
-                        break;
-                    } else if (header.type == POTATO_TRANSFER) {
-                        // Received potato from ringmaster
-                        Potato potato;
-                        potato.deserialize(data.data());
+                    try {
+                        Potato potato = NetworkUtils::receive_potato(master_fd);
+                        if (potato.get_hops() == 0) {
+                            // Game over signal
+                            break;
+                        }
                         handle_potato(potato);
+                    } catch (const NetworkError& e) {
+                        // If we get an error from the master, it's likely game over
+                        if (std::string(e.what()).find("connection reset") != std::string::npos ||
+                            std::string(e.what()).find("connection closed") != std::string::npos) {
+                            break;
+                        }
+                        throw; // Re-throw other errors
                     }
                 }
                 
-                // Left neighbor socket
                 if (FD_ISSET(left_fd, &read_fds)) {
-                    Potato potato = NetworkUtils::receive_potato(left_fd);
-                    handle_potato(potato);
+                    try {
+                        Potato potato = NetworkUtils::receive_potato(left_fd);
+                        if (potato.get_hops() == 0) {
+                            break;  // Game over
+                        }
+                        handle_potato(potato);
+                    } catch (const NetworkError& e) {
+                        // Likely shutdown in progress
+                        break;
+                    }
                 }
                 
-                // Right neighbor socket
                 if (FD_ISSET(right_fd, &read_fds)) {
-                    Potato potato = NetworkUtils::receive_potato(right_fd);
-                    handle_potato(potato);
+                    try {
+                        Potato potato = NetworkUtils::receive_potato(right_fd);
+                        if (potato.get_hops() == 0) {
+                            break;  // Game over
+                        }
+                        handle_potato(potato);
+                    } catch (const NetworkError& e) {
+                        // Likely shutdown in progress
+                        break;
+                    }
                 }
-                
             } catch (const NetworkError& e) {
-                // If there's an error reading from a socket (e.g., connection closed),
-                // it's likely the game is over or there's a major problem
-                std::cerr << e.what() << std::endl;
-                exit(EXIT_FAILURE);
+                // During shutdown, we might get errors when connections close
+                if (std::string(e.what()).find("connection reset") != std::string::npos ||
+                    std::string(e.what()).find("connection closed") != std::string::npos) {
+                    // Normal shutdown - just exit the game loop
+                    break;
+                } else {
+                    // Unexpected error during active game
+                    std::cerr << e.what() << std::endl;
+                    exit(EXIT_FAILURE);
+                }
             }
         }
     }
